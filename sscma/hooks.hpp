@@ -49,29 +49,29 @@ void init_action_hook(std::string cmd) {
     }
 }
 
-void init_wifi_hook(std::string cmd) {
-    auto config = wifi_sta_cfg_t{};
-    if (static_resource->storage->get(el_make_storage_kv_from_type(config))) [[likely]]
-        set_wifi_network(
-          {cmd + "@WIFI", std::string(config.name), std::to_string(config.security_type), std::string(config.passwd)},
-          static_cast<void*>(static_resource->serial),
-          true);
-    static_resource->supervisor->register_supervised_object(static_resource->wifi, 10);
-}
+// void init_wifi_hook(std::string cmd) {
+//     auto config = wifi_sta_cfg_t{};
+//     if (static_resource->storage->get(el_make_storage_kv_from_type(config))) [[likely]]
+//         set_wifi_network(
+//           {cmd + "@WIFI", std::string(config.name), std::to_string(config.security_type), std::string(config.passwd)},
+//           static_cast<void*>(static_resource->serial),
+//           true);
+//     static_resource->supervisor->register_supervised_object(static_resource->wifi, 10);
+// }
 
-void init_mqtt_hook(std::string cmd) {
-    auto config = mqtt_server_config_t{};
-    if (static_resource->storage->get(el_make_storage_kv_from_type(config))) [[likely]]
-        set_mqtt_server({cmd + "@MQTTSERVER",
-                         std::string(config.client_id),
-                         std::string(config.address),
-                         std::to_string(config.port),
-                         std::string(config.username),
-                         std::string(config.password),
-                         std::to_string(config.use_ssl)},
-                        static_cast<void*>(static_resource->serial),
-                        true);
-    static_resource->supervisor->register_supervised_object(static_resource->mqtt, 1000);
-}
+// void init_mqtt_hook(std::string cmd) {
+//     auto config = mqtt_server_config_t{};
+//     if (static_resource->storage->get(el_make_storage_kv_from_type(config))) [[likely]]
+//         set_mqtt_server({cmd + "@MQTTSERVER",
+//                          std::string(config.client_id),
+//                          std::string(config.address),
+//                          std::to_string(config.port),
+//                          std::string(config.username),
+//                          std::string(config.password),
+//                          std::to_string(config.use_ssl)},
+//                         static_cast<void*>(static_resource->serial),
+//                         true);
+//     static_resource->supervisor->register_supervised_object(static_resource->mqtt, 1000);
+// }
 
 }  // namespace sscma::hooks

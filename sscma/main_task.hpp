@@ -42,8 +42,8 @@ void init_static_resource() {
             init_model_hook(caller);
             init_sensor_hook(caller);
             init_action_hook(caller);
-            init_wifi_hook(caller);
-            init_mqtt_hook(caller);
+            //init_wifi_hook(caller);
+            //init_mqtt_hook(caller);
         });
     });
 }
@@ -276,64 +276,59 @@ void register_commands() {
           return EL_OK;
       });
 
-    static_resource->instance->register_cmd(
-      "WIFI",
-      "Set and connect to a Wi-Fi",
-      "\"NAME\",SECURITY,\"PASSWORD\"",
-      [](std::vector<std::string> argv, void* caller) {
-          static_resource->executor->add_task(
-            [argv = std::move(argv), caller](const std::atomic<bool>&) { set_wifi_network(argv, caller); });
-          return EL_OK;
-      });
+    // static_resource->instance->register_cmd(
+    //   "WIFI",
+    //   "Set and connect to a Wi-Fi",
+    //   "\"NAME\",SECURITY,\"PASSWORD\"",
+    //   [](std::vector<std::string> argv, void* caller) {
+    //       static_resource->executor->add_task(
+    //         [argv = std::move(argv), caller](const std::atomic<bool>&) { set_wifi_network(argv, caller); });
+    //       return EL_OK;
+    //   });
 
-    static_resource->instance->register_cmd(
-      "WIFI?", "Get current Wi-Fi status and config", "", [](std::vector<std::string> argv, void* caller) {
-          static_resource->executor->add_task(
-            [cmd = std::move(argv[0]), caller](const std::atomic<bool>&) { get_wifi_network(cmd, caller); });
-          return EL_OK;
-      });
+    // static_resource->instance->register_cmd(
+    //   "WIFI?", "Get current Wi-Fi status and config", "", [](std::vector<std::string> argv, void* caller) {
+    //       static_resource->executor->add_task(
+    //         [cmd = std::move(argv[0]), caller](const std::atomic<bool>&) { get_wifi_network(cmd, caller); });
+    //       return EL_OK;
+    //   });
 
-    static_resource->instance->register_cmd(
-      "MQTTSERVER",
-      "Set and connect to a MQTT server",
-      "\"CLIENT_ID\",\"ADDRESS\",PORT,\"USERNAME\",\"PASSWORD\",USE_SSL",
-      [](std::vector<std::string> argv, void* caller) {
-          static_resource->executor->add_task(
-            [argv = std::move(argv), caller](const std::atomic<bool>&) { set_mqtt_server(argv, caller); });
-          return EL_OK;
-      });
+    // static_resource->instance->register_cmd(
+    //   "MQTTSERVER",
+    //   "Set and connect to a MQTT server",
+    //   "\"CLIENT_ID\",\"ADDRESS\",PORT,\"USERNAME\",\"PASSWORD\",USE_SSL",
+    //   [](std::vector<std::string> argv, void* caller) {
+    //       static_resource->executor->add_task(
+    //         [argv = std::move(argv), caller](const std::atomic<bool>&) { set_mqtt_server(argv, caller); });
+    //       return EL_OK;
+    //   });
 
-    static_resource->instance->register_cmd(
-      "MQTTSERVER?", "Get current MQTT server status and config", "", [](std::vector<std::string> argv, void* caller) {
-          static_resource->executor->add_task(
-            [cmd = std::move(argv[0]), caller](const std::atomic<bool>&) { get_mqtt_server(cmd, caller); });
-          return EL_OK;
-      });
+    // static_resource->instance->register_cmd(
+    //   "MQTTSERVER?", "Get current MQTT server status and config", "", [](std::vector<std::string> argv, void* caller) {
+    //       static_resource->executor->add_task(
+    //         [cmd = std::move(argv[0]), caller](const std::atomic<bool>&) { get_mqtt_server(cmd, caller); });
+    //       return EL_OK;
+    //   });
 
-    static_resource->instance->register_cmd(
-      "MQTTPUBSUB?",
-      "Get current MQTT publish and subscribe topic",
-      "",
-      [](std::vector<std::string> argv, void* caller) {
-          static_resource->executor->add_task(
-            [cmd = std::move(argv[0]), caller](const std::atomic<bool>&) { get_mqtt_pubsub(cmd, caller); });
-          return EL_OK;
-      });
+    // static_resource->instance->register_cmd(
+    //   "MQTTPUBSUB?",
+    //   "Get current MQTT publish and subscribe topic",
+    //   "",
+    //   [](std::vector<std::string> argv, void* caller) {
+    //       static_resource->executor->add_task(
+    //         [cmd = std::move(argv[0]), caller](const std::atomic<bool>&) { get_mqtt_pubsub(cmd, caller); });
+    //       return EL_OK;
+    //   });
 }
 
 void wait_for_inputs() {
     // mark the system status as ready
-    static_resource->executor->add_task(
-        [](const std::atomic<bool>&) { static_resource->is_ready.store(true); }
-    );
+    static_resource->executor->add_task([](const std::atomic<bool>&) { static_resource->is_ready.store(true); });
 
     EL_LOGI("[SSCMA] AT server is ready to use :)");
 
-    auto transports = std::forward_list<Transport*>{
-        static_resource->serial, 
-        static_resource->mqtt, 
-        static_resource->wire
-    };
+    auto transports =
+      std::forward_list<Transport*>{static_resource->serial, static_resource->wire, static_resource->at};
     char* buf = reinterpret_cast<char*>(el_aligned_malloc_once(16, SSCMA_CMD_MAX_LENGTH + 1));
     std::memset(buf, 0, SSCMA_CMD_MAX_LENGTH + 1);
 

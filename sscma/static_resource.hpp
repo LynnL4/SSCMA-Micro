@@ -56,11 +56,12 @@ class StaticResource final {
     bool                     is_invoke;
 
     // external resources (hardware related)
-    Device*            device;
-    Serial*            serial;
-    Wire*              wire;
-    WiFi*              wifi;
-    MQTT*              mqtt;
+    Device* device;
+    Serial* serial;
+    Serial* at;
+    Wire*   wire;
+    //WiFi*              wifi;
+    //MQTT*              mqtt;
     Models*            models;
     Storage*           storage;
     Engine*            engine;
@@ -80,6 +81,7 @@ class StaticResource final {
 
         serial = device->get_serial();
         wire   = device->get_wire();
+        at     = device->get_at();
 
         models             = Models::get_ptr();
         storage            = Storage::get_ptr();
@@ -88,11 +90,11 @@ class StaticResource final {
         static auto v_engine{EngineTFLite()};
         engine = &v_engine;
 
-        static auto v_wifi{WiFi()};
-        wifi = &v_wifi;
+        // static auto v_wifi{WiFi()};
+        // wifi = &v_wifi;
 
-        static auto v_mqtt{MQTT(wifi)};
-        mqtt = &v_mqtt;
+        // static auto v_mqtt{MQTT(wifi)};
+        // mqtt = &v_mqtt;
 
         static auto v_instance{Server()};
         instance = &v_instance;
@@ -101,7 +103,6 @@ class StaticResource final {
         executor = &v_executor;
 
         supervisor = Supervisor::get_ptr();
-
         static auto v_action{Condition()};
         action = &v_action;
 
@@ -134,6 +135,7 @@ class StaticResource final {
         EL_LOGI("[SSCMA] initializing basic IO devices...");
         if (serial) serial->init();
         if (wire) wire->init();
+        if (at) at->init();
     }
 
     inline void init_backend() {

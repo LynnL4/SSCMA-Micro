@@ -382,52 +382,52 @@ static void at_base_init(NetworkWE2* ptr) {
 namespace edgelab {
 
 void NetworkWE2::init(status_cb_t cb) {
-    el_err_code_t err = EL_OK;
-    _at = &at;
-    if (at.state == AT_STATE_LOST) {
-        at_base_init(this);
-        if (at.state != AT_STATE_IDLE) return;
-    }
-    if (at.port == NULL) {
-        at_port_init(&at);
-        if (at.port == NULL) return;
-    }
+    // el_err_code_t err = EL_OK;
+    // _at = &at;
+    // if (at.state == AT_STATE_LOST) {
+    //     at_base_init(this);
+    //     if (at.state != AT_STATE_IDLE) return;
+    // }
+    // if (at.port == NULL) {
+    //     at_port_init(&at);
+    //     if (at.port == NULL) return;
+    // }
 
-    xSemaphoreGive(pubraw_complete);
-    at_port_flush(&at);
+    // xSemaphoreGive(pubraw_complete);
+    // at_port_flush(&at);
 
-    sprintf(at.tbuf, AT_STR_ECHO AT_STR_CRLF);
-    err = at_send(&at, AT_SHORT_TIME_MS);
-    if (err != EL_OK) {
-        EL_LOGW("AT ECHO ERROR : %d\n", err);
-        return;
-    }
-    sprintf(at.tbuf, AT_STR_HEADER AT_STR_CWMODE "=1" AT_STR_CRLF);
-    err = at_send(&at, AT_SHORT_TIME_MS);
-    if (err != EL_OK) {
-        EL_LOGW("AT CWMODE ERROR : %d\n", err);
-        return;
-    }
+    // sprintf(at.tbuf, AT_STR_ECHO AT_STR_CRLF);
+    // err = at_send(&at, AT_SHORT_TIME_MS);
+    // if (err != EL_OK) {
+    //     EL_LOGW("AT ECHO ERROR : %d\n", err);
+    //     return;
+    // }
+    // sprintf(at.tbuf, AT_STR_HEADER AT_STR_CWMODE "=1" AT_STR_CRLF);
+    // err = at_send(&at, AT_SHORT_TIME_MS);
+    // if (err != EL_OK) {
+    //     EL_LOGW("AT CWMODE ERROR : %d\n", err);
+    //     return;
+    // }
     
-    if (cb) this->status_cb = cb;
-    EL_LOGI("network init ok\n");
-    this->_time_synced = false;
+    // if (cb) this->status_cb = cb;
+    // EL_LOGI("network init ok\n");
+    // this->_time_synced = false;
     this->set_status(NETWORK_IDLE);
 }
 
 void NetworkWE2::deinit() {
-    vTaskDelete(at_rx_parser);
-    vTaskDelete(status_handler);
-#ifdef CONFIG_EL_NETWORK_SPI_AT
-    vTaskDelete(spi_trans_ctrl);
-    at.port->spi_close();
-#else
-    at.port->uart_close();
-#endif
-    delete at_rbuf;
-    at.port = NULL;
-    at.state = AT_STATE_LOST;
-    this->set_status(NETWORK_LOST);
+//     vTaskDelete(at_rx_parser);
+//     vTaskDelete(status_handler);
+// #ifdef CONFIG_EL_NETWORK_SPI_AT
+//     vTaskDelete(spi_trans_ctrl);
+//     at.port->spi_close();
+// #else
+//     at.port->uart_close();
+// #endif
+//     delete at_rbuf;
+//     at.port = NULL;
+//     at.state = AT_STATE_LOST;
+//     this->set_status(NETWORK_LOST);
 }
 
 el_err_code_t NetworkWE2::join(const char* ssid, const char* pwd) {

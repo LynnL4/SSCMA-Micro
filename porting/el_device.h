@@ -53,6 +53,7 @@ class Device {
     Camera*  get_camera() { return _camera; }
     Display* get_display() { return _display; }
     Serial*  get_serial() { return _serial; }
+    Serial*  get_at() { return _at; }
     Network* get_network() { return _network; }
     Wire*    get_wire() { return _wire; }
 
@@ -119,6 +120,7 @@ class Device {
     Camera*  _camera;
     Display* _display;
     Serial*  _serial;
+    Serial*  _at;
     Network* _network;
     Wire*    _wire;
 
