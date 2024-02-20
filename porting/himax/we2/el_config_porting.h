@@ -62,7 +62,7 @@
 #define CONFIG_EL_NETWORK_PRIO                  4
 #define CONFIG_EL_NETWORK_STACK_SIZE            512
 #define CONFIG_EL_NETWORK_STATUS_PRIO           4
-#define CONFIG_EL_NETWORK_STATUS_STACK_SIZE     128
+#define CONFIG_EL_NETWORK_STATUS_STACK_SIZE     256
 
 #define CONFIG_EL_NETWORK_SPI_AT                1
 

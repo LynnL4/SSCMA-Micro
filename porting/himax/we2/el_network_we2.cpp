@@ -29,58 +29,89 @@
 
 #include "core/el_debug.h"
 
-lwRingBuffer*         at_rbuf   = NULL;
-static esp_at_t       at = {0};
-static TaskHandle_t   at_rx_parser   = NULL;
-static TaskHandle_t   status_handler = NULL;
+lwRingBuffer*       at_rbuf        = NULL;
+static esp_at_t     at             = {0};
+static TaskHandle_t at_rx_parser   = NULL;
+static TaskHandle_t status_handler = NULL;
 
 static SemaphoreHandle_t at_got_response = NULL;
 static SemaphoreHandle_t pubraw_complete = NULL;
 
-static uint16_t send_len = 0;
-static uint8_t fail_count = 0;
+static uint16_t send_len   = 0;
+static uint8_t  fail_count = 0;
 
 static resp_trigger_t resp_flow[] = {
-    {AT_STR_RESP_OK,     resp_action_ok},
-    {AT_STR_RESP_ERROR,  resp_action_error},
-    {AT_STR_RESP_READY,  resp_action_ready},
-    {AT_STR_RESP_WIFI_H, resp_action_wifi},
-    {AT_STR_RESP_PUBRAW, resp_action_pubraw},
-    {AT_STR_RESP_MQTT_H, resp_action_mqtt},
-    {AT_STR_RESP_IP_H,   resp_action_ip},
-    {AT_STR_RESP_NTP,    resp_action_ntp}
+  {    AT_STR_RESP_OK,     resp_action_ok},
+  { AT_STR_RESP_ERROR,  resp_action_error},
+  { AT_STR_RESP_READY,  resp_action_ready},
+  {AT_STR_RESP_WIFI_H,   resp_action_wifi},
+  {AT_STR_RESP_PUBRAW, resp_action_pubraw},
+  {AT_STR_RESP_MQTT_H,   resp_action_mqtt},
+  {  AT_STR_RESP_IP_H,     resp_action_ip},
+  {   AT_STR_RESP_NTP,    resp_action_ntp}
 };
 
 #ifdef CONFIG_EL_NETWORK_SPI_AT
-static uint8_t send_seq = 0;
-static uint8_t recv_seq = 0;
-static TaskHandle_t spi_trans_ctrl = NULL;
-volatile static SemaphoreHandle_t spi_sem = NULL;
+static uint8_t           send_seq       = 0;
+static uint8_t           recv_seq       = 0;
+static TaskHandle_t      spi_trans_ctrl = NULL;
+static SemaphoreHandle_t tx_done        = NULL;
+static SemaphoreHandle_t spi_lock       = NULL;
+static uint8_t           tx_buf[4095];
+static uint8_t           send_req[7] = {0x01, 0x00, 0x00, 0xfe, send_seq, 0, 0};
 
 static void spi_dma_cb(void* status);
 static void at_port_handshake_cb(uint8_t group, uint8_t aIndex);
 
 static void at_requset_write(esp_at_t* at) {
     static uint8_t value = 0;
-    hx_drv_gpio_get_in_value(AON_GPIO0, &value);
-    if (value == 1) {
-        EL_LOGD("clean handshake before write");
-        xTaskNotify(spi_trans_ctrl, AT_SPI_HANDSHAKE_FLAG, eNoAction);
-        el_sleep(4);
+
+    do {
+        hx_drv_gpio_get_in_value(AON_GPIO0, &value);
+        el_sleep(2);
+    } while (value);
+
+    xSemaphoreTake(spi_lock, portMAX_DELAY);
+
+    if (at->sent_len < at->tbuf_len) {
+        send_len =
+          at->tbuf_len - at->sent_len > AT_DMA_TRAN_MAX_SIZE ? AT_DMA_TRAN_MAX_SIZE : at->tbuf_len - at->sent_len;
+        send_req[5] = (send_len) & 0xff;
+        send_req[6] = (send_len >> 8) & 0xff;
+        at->port->spi_write(send_req, 7);
+    } else {
+        at->tbuf_len = 0;
+        at->sent_len = 0;
     }
 
-    static uint8_t send_req[7] = {0x01, 0x00, 0x00, 0xfe, send_seq, 0, 0};
-    send_len = at->tbuf_len - at->sent_len > AT_DMA_TRAN_MAX_SIZE ? 
-                AT_DMA_TRAN_MAX_SIZE : at->tbuf_len - at->sent_len;
-    send_req[5] = (send_len) & 0xff;
-    send_req[6] = (send_len >> 8) & 0xff;
-    at->port->spi_write(send_req, 7);
+    xSemaphoreGive(spi_lock);
+}
+
+static void at_requset_reset(esp_at_t* at) {
+    static uint8_t value = 0;
+
+    xSemaphoreTake(spi_lock, portMAX_DELAY);
+
+    if (at->sent_len < at->tbuf_len) {
+        static uint8_t send_req[7] = {0x01, 0x00, 0x00, 0xfe, send_seq, 0, 0};
+        send_len =
+          at->tbuf_len - at->sent_len > AT_DMA_TRAN_MAX_SIZE ? AT_DMA_TRAN_MAX_SIZE : at->tbuf_len - at->sent_len;
+        send_req[5] = (send_len) & 0xff;
+        send_req[6] = (send_len >> 8) & 0xff;
+        at->port->spi_write(send_req, 7);
+        EL_LOGI("rw %d:%d/%d", send_len, at->sent_len, at->tbuf_len);
+    } else {
+        at->tbuf_len = 0;
+        at->sent_len = 0;
+    }
+
+    xSemaphoreGive(spi_lock);
 }
 
 #else
 static uint8_t dma_rx[4] = {0};
-static void at_port_txcb(void* arg);
-static void at_port_rxcb(void* arg);
+static void    at_port_txcb(void* arg);
+static void    at_port_rxcb(void* arg);
 #endif
 
 static void at_port_write(esp_at_t* at) {
@@ -94,16 +125,18 @@ static void at_port_write(esp_at_t* at) {
 
 // flush buffer by 254 bytes zero and CRLF util at-port can response
 static void at_port_flush(esp_at_t* at) {
-    EL_LOGW("FLUSH...\n");
-    at->state = AT_STATE_PROCESS;
+    EL_LOGD("FLUSH...\n");
+    at->state  = AT_STATE_PROCESS;
     uint32_t t = 0;
     memset((void*)at->tbuf, '0', 254);
     memcpy((void*)at->tbuf + 254, AT_STR_CRLF, strlen(AT_STR_CRLF));
     while (at->state == AT_STATE_PROCESS) {
-        send_len = 256;
+        at->sent_len = 0;
+        at->tbuf_len = 256;
+        send_len     = 0;
         at_port_write(at);
         if (t >= AT_SHORT_TIME_MS) {
-            EL_LOGW("AT FLUSH TIMEOUT\n");
+            EL_LOGD("AT FLUSH TIMEOUT\n");
             return;
         }
         el_sleep(10);
@@ -114,14 +147,14 @@ static void at_port_flush(esp_at_t* at) {
 static void at_port_init(esp_at_t* at) {
 #ifdef CONFIG_EL_NETWORK_SPI_AT
     SCU_PAD_PULL_LIST_T pull_cfg;
-    pull_cfg.pa0.pull_en = SCU_PAD_PULL_EN;
+    pull_cfg.pa0.pull_en  = SCU_PAD_PULL_EN;
     pull_cfg.pa0.pull_sel = SCU_PAD_PULL_DOWN;
-    pull_cfg.pb2.pull_en = SCU_PAD_PULL_EN;
+    pull_cfg.pb2.pull_en  = SCU_PAD_PULL_EN;
     pull_cfg.pb2.pull_sel = SCU_PAD_PULL_DOWN;
-    pull_cfg.pb3.pull_en = SCU_PAD_PULL_EN;
+    pull_cfg.pb3.pull_en  = SCU_PAD_PULL_EN;
     pull_cfg.pb3.pull_sel = SCU_PAD_PULL_DOWN;
     hx_drv_scu_set_PA0_pinmux(SCU_PA0_PINMUX_AON_GPIO0_0, 0);
-    hx_drv_scu_set_all_pull_cfg(&pull_cfg); 
+    hx_drv_scu_set_all_pull_cfg(&pull_cfg);
     hx_drv_gpio_set_int_type(AON_GPIO0, GPIO_IRQ_TRIG_TYPE_EDGE_RISING);
     hx_drv_gpio_cb_register(AON_GPIO0, at_port_handshake_cb);
     hx_drv_gpio_set_input(AON_GPIO0);
@@ -154,21 +187,23 @@ static void at_port_init(esp_at_t* at) {
 }
 
 static el_err_code_t at_send(esp_at_t* at, uint32_t timeout) {
-    xSemaphoreTake(at_got_response, 0); // clear semaphore
-    EL_LOGI("-> %s\n", at->tbuf);
-    at->state = AT_STATE_PROCESS;
+    xSemaphoreTake(at_got_response, 0);  // clear semaphore
+    EL_LOGD("-> %s\n", at->tbuf);
+    at->state    = AT_STATE_PROCESS;
     at->sent_len = 0;
+    EL_LOGD("[%d]:%d\n", el_get_time_ms(), __LINE__);
     at_port_write(at);
-
+    EL_LOGD("[%d]:%d\n", el_get_time_ms(), __LINE__);
     if (xSemaphoreTake(at_got_response, timeout) == pdFALSE) {
         EL_LOGD("AT TIMEOUT\n");
         return EL_ETIMOUT;
     }
-
+    EL_LOGD("[%d]:%d\n", el_get_time_ms(), __LINE__);
     if (at->state != AT_STATE_OK) {
         EL_LOGD("AT STATE ERROR: %d\n", at->state);
         return EL_EIO;
     }
+    EL_LOGD("[%d]:%d\n", el_get_time_ms(), __LINE__);
     return EL_OK;
 }
 
@@ -176,50 +211,45 @@ static el_err_code_t at_send(esp_at_t* at, uint32_t timeout) {
 
 // update status for spi write, read spi when readable
 static void spi_trans_task(void* arg) {
-    static uint8_t value = 0;
-    static uint32_t time = 0;
-    static const uint8_t query[3] = {0x02, 0x04, 0x00};
-    static const uint8_t read_hdr[3] = {0x04, 0x04, 0x00};
-    static const uint8_t read_done[3] = {0x08, 0x04, 0x00};
-    static const uint8_t write_hdr[3] = {0x03, 0x00, 0x00};
-    static const uint8_t write_done[3] = {0x07, 0x00, 0x00};
-    static uint8_t read_data[256] = {0};
-    xSemaphoreTake(spi_sem, 0);
+    static uint8_t       value          = 0;
+    static uint32_t      time           = 0;
+    static const uint8_t query[3]       = {0x02, 0x04, 0x00};
+    static const uint8_t read_hdr[3]    = {0x04, 0x04, 0x00};
+    static const uint8_t read_done[3]   = {0x08, 0x04, 0x00};
+    static const uint8_t write_hdr[3]   = {0x03, 0x00, 0x00};
+    static const uint8_t write_done[3]  = {0x07, 0x00, 0x00};
+    static uint8_t       read_data[256] = {0};
+    xSemaphoreTake(tx_done, 0);
     while (1) {
-        if (xTaskNotifyWait(ULONG_MAX, ULONG_MAX, NULL, portMAX_DELAY) != pdPASS) continue;
-
-        SCB_CleanDCache_by_Addr((volatile void*)&(at.ctrl), 4);
-        at.port->spi_write_then_read_dma(
-            (void *)query, sizeof(query),
-            (void *)&(at.ctrl), 4,
-            (void *)spi_dma_cb
-        );
-        if (xSemaphoreTake(spi_sem, 20) != pdPASS) {
-            EL_LOGW("spi dma query timeout\n");
-            xSemaphoreGive(spi_sem);
-            continue;
+        if (xTaskNotifyWait(ULONG_MAX, ULONG_MAX, NULL, 10) != pdPASS) {
+            hx_drv_gpio_get_in_value(AON_GPIO0, &value);
+            if (value == 0) {
+                continue;
+            }
         }
-        // EL_LOGI("[direct: %d, len: %d, seq: %d]", at.ctrl.direct, at.ctrl.len, at.ctrl.seq);
+        el_printf("[%d]:%d\n", (uint32_t)el_get_time_ms(), __LINE__);
+        xSemaphoreTake(spi_lock, portMAX_DELAY);
+        el_printf("[%d]:%d\n", (uint32_t)el_get_time_ms(), __LINE__);
+        SCB_CleanDCache_by_Addr((volatile void*)&(at.ctrl), 4);
+        el_printf("[%d]:%d\n", (uint32_t)el_get_time_ms(), __LINE__);
+        at.port->spi_write_then_read_dma((void*)query, sizeof(query), (void*)&(at.ctrl), 4, (void*)spi_dma_cb);
+        el_printf("[%d]:%d\n", (uint32_t)el_get_time_ms(), __LINE__);
+        xSemaphoreTake(tx_done, 100);
+        el_printf("[%d]:%d\n", (uint32_t)el_get_time_ms(), __LINE__);
 
-        if (at.ctrl.direct == 0x01) 
-        {
-            EL_LOGI("readable, len: %d, seq: %d", at.ctrl.len, at.ctrl.seq);
+        // EL_LOGD("[direct: %d, len: %d, seq: %d]", at.ctrl.direct, at.ctrl.len, at.ctrl.seq);
+
+        if (at.ctrl.direct == 0x01) {
+            EL_LOGD("readable, len: %d, seq: %d", at.ctrl.len, at.ctrl.seq);
             recv_seq = (recv_seq + 1) % 256;
 
             SCB_CleanDCache_by_Addr((volatile void*)read_data, at.ctrl.len);
             at.port->spi_write_then_read_dma(
-                (void *)read_hdr, sizeof(read_hdr),
-                (void *)read_data, at.ctrl.len,
-                (void *)spi_dma_cb
-            );
-            if (xSemaphoreTake(spi_sem, 20) != pdPASS) {
-                EL_LOGW("spi dma read timeout\n");
-                xSemaphoreGive(spi_sem);
-                continue;
-            }
+              (void*)read_hdr, sizeof(read_hdr), (void*)read_data, at.ctrl.len, (void*)spi_dma_cb);
+
+            xSemaphoreTake(tx_done, 100);
 
             read_data[at.ctrl.len] = '\0';
-            EL_LOGD("read: %s", (char*)read_data);
             for (uint16_t i = 0; i < at.ctrl.len; i++) {
                 *at_rbuf << (char)read_data[i];
                 if ((char)read_data[i] == '\n') {
@@ -229,71 +259,73 @@ static void spi_trans_task(void* arg) {
 
             at.port->spi_write(read_done, sizeof(read_done));
             time = xTaskGetTickCount();
-            do { 
+            do {
                 hx_drv_gpio_get_in_value(AON_GPIO0, &value);
-                if (xTaskGetTickCount() > time + 10) break;
+                if (xTaskGetTickCount() > time + 20) break;
             } while (value == 1);
             EL_LOGD("read done\n");
             portYIELD();
-        } 
-        else if (at.ctrl.direct == 0x02) 
-        {
+        } else if (at.ctrl.direct == 0x02) {
             EL_LOGD("writeable, len: %d, seq: %d", at.ctrl.len, at.ctrl.seq);
-            
-            SCB_CleanDCache_by_Addr((volatile void*)at.tbuf, at.tbuf_len);
-            at.port->spi_write_ptl(write_hdr, sizeof(write_hdr), 
-                                   at.tbuf + at.sent_len, send_len, // at.ctrl.len < send_len ? at.ctrl.len : send_len, 
-                                   (void *)spi_dma_cb);
-            if (xSemaphoreTake(spi_sem, 40) != pdPASS) {
-                EL_LOGW("\n\n\n\n [spi dma write timeout]\n\n\n\n");
-                xSemaphoreGive(spi_sem);
-                continue;
-            }
+
+            //SCB_CleanDCache_by_Addr((volatile void*)at.tbuf, at.tbuf_len);
+            EL_LOGI("writting: %d:%d/%d", send_len, at.sent_len, at.tbuf_len);
+            memset(tx_buf, 0, sizeof(tx_buf));
+            memcpy(tx_buf, write_hdr, sizeof(write_hdr));
+            memcpy(tx_buf + sizeof(write_hdr), at.tbuf + at.sent_len, send_len);
+            at.port->spi_write_dma(tx_buf, send_len + sizeof(write_hdr), (void*)spi_dma_cb);
+
+            xSemaphoreTake(tx_done, 100);
 
             send_seq++;
             at.sent_len += send_len;
             at.port->spi_write(write_done, sizeof(write_done));
 
             time = xTaskGetTickCount();
-            do { 
+            do {
                 hx_drv_gpio_get_in_value(AON_GPIO0, &value);
-                if (xTaskGetTickCount() > time + 10) break;
+                if (xTaskGetTickCount() > time + 20) break;
             } while (value == 1);
-            EL_LOGD("wrote %d/%d", at.sent_len, at.tbuf_len);
+            EL_LOGI("wrote %d:%d/%d", send_len, at.sent_len, at.tbuf_len);
 
             if (at.sent_len < at.tbuf_len) {
-                at_requset_write(&at);
+                send_len =
+                  at.tbuf_len - at.sent_len > AT_DMA_TRAN_MAX_SIZE ? AT_DMA_TRAN_MAX_SIZE : at.tbuf_len - at.sent_len;
+                send_req[5] = (send_len) & 0xff;
+                send_req[6] = (send_len >> 8) & 0xff;
+                at.port->spi_write(send_req, 7);
+                EL_LOGI("rw %d:%d/%d", send_len, at.sent_len, at.tbuf_len);
             } else {
                 at.sent_len = 0;
                 at.tbuf_len = 0;
             }
-        } else {
-            EL_LOGW("unknown direct: %d", at.ctrl.direct);
-            continue;
         }
+
+        xSemaphoreGive(spi_lock);
+        el_printf("[%d]:%d\n", (uint32_t)el_get_time_ms(), __LINE__);
     }
 }
 
 static void at_recv_parser(void* arg) {
-    char str[512] = {0};
-    char *ptr = NULL;
+    char     str[512] = {0};
+    char*    ptr      = NULL;
     uint32_t len = 0, i = 0;
     uint32_t num = sizeof(resp_flow) / sizeof(resp_flow[0]);
     while (1) {
         if (ulTaskNotifyTake(pdFALSE, portMAX_DELAY) > 0) {
-            len = at_rbuf->extract('\n', str, sizeof(str));
+            len      = at_rbuf->extract('\n', str, sizeof(str));
             str[len] = '\0';
-            ptr = (str[0] == '>') ? str + 1 : str;
+            ptr      = (str[0] == '>') ? str + 1 : str;
             for (i = 0; i < num; i++) {
                 if (strncmp(ptr, resp_flow[i].str, strlen(resp_flow[i].str)) == 0) {
                     resp_flow[i].act(ptr, arg);
-                    fail_count = 0; // got response, reset fail count
-                    EL_LOGI("<- %s", ptr);
+                    fail_count = 0;  // got response, reset fail count
+                    EL_LOGD("<- %s", ptr);
                     break;
                 }
             }
             if (i == num && len > 2) {
-                EL_LOGI("<- %s\n", ptr);
+                EL_LOGD("<- %s\n", ptr);
             }
             memset(str, 0, len);
         }
@@ -301,13 +333,13 @@ static void at_recv_parser(void* arg) {
 }
 
 static void network_status_handler(void* arg) {
-    uint32_t value  = 0;
-    edgelab::NetworkWE2* net = (edgelab::NetworkWE2*)arg;
+    uint32_t             value = 0;
+    edgelab::NetworkWE2* net   = (edgelab::NetworkWE2*)arg;
     while (1) {
         if (xTaskNotifyWait(ULONG_MAX, ULONG_MAX, &value, portMAX_DELAY) == pdPASS) {
             // switch (value)
             // {
-            // case NETWORK_JOINED: 
+            // case NETWORK_JOINED:
             //     sprintf(at.tbuf, AT_STR_HEADER AT_STR_CIPSTA "?" AT_STR_CRLF);
             //     at_send(&at, AT_SHORT_TIME_MS);
             // default:
@@ -318,64 +350,54 @@ static void network_status_handler(void* arg) {
     }
 }
 
-// static void logger(void* arg) {
-//     char pcWriteBuffer[512] = {0};
-//     while (1) {
-        // vTaskList(pcWriteBuffer);
-        // el_printf("\nName                           State Priority Stack Num\n");
-        // el_printf("%s", pcWriteBuffer);
-        // vTaskGetRunTimeStats(pcWriteBuffer);
-        // el_printf("\nTask Name                         Run Time  CPU Usage\n");
-        // el_printf("%s", pcWriteBuffer);
-//         el_printf(" >_< \n");
-//         vTaskDelay(15 * 1000);
-//     }
-// }
+static void logger(void* arg) {
+    char pcWriteBuffer[1024] = {0};
+    while (1) {
+        vTaskList(pcWriteBuffer);
+        el_printf("\nName                           State Priority Stack Num\n");
+        el_printf("%s", pcWriteBuffer);
+        vTaskDelay(10 * 1000);
+    }
+}
 
 static void at_base_init(NetworkWE2* ptr) {
     EL_LOGD("at_base_init\n");
 
     at_rbuf = new lwRingBuffer(AT_RX_MAX_LEN);
+
     at_got_response = xSemaphoreCreateBinary();
     pubraw_complete = xSemaphoreCreateBinary();
-
-    spi_sem = xSemaphoreCreateBinary();
+    tx_done         = xSemaphoreCreateBinary();
+    spi_lock        = xSemaphoreCreateMutex();
 
     EL_ASSERT(at_rbuf);
     EL_ASSERT(at_got_response);
     EL_ASSERT(pubraw_complete);
     at.rbuf = at_rbuf;
     // Parse data and trigger events
-    if (xTaskCreate(at_recv_parser, 
-                    "at_recv_parser", 
-                    CONFIG_EL_NETWORK_STACK_SIZE, 
-                    ptr, 
-                    CONFIG_EL_NETWORK_PRIO, 
-                    &at_rx_parser) != pdPASS) {
+    if (xTaskCreate(
+          at_recv_parser, "at_recv_parser", CONFIG_EL_NETWORK_STACK_SIZE, ptr, CONFIG_EL_NETWORK_PRIO, &at_rx_parser) !=
+        pdPASS) {
         EL_LOGD("at_recv_parser create error\n");
         return;
     }
     // Handle network status change events
-    if (xTaskCreate(network_status_handler, 
-                    "network_status_handler", 
-                    CONFIG_EL_NETWORK_STATUS_STACK_SIZE, 
-                    ptr, 
-                    CONFIG_EL_NETWORK_STATUS_PRIO, 
+    if (xTaskCreate(network_status_handler,
+                    "network_status_handler",
+                    CONFIG_EL_NETWORK_STATUS_STACK_SIZE,
+                    ptr,
+                    CONFIG_EL_NETWORK_STATUS_PRIO,
                     &status_handler) != pdPASS) {
         EL_LOGD("network_status_handler create error\n");
         return;
     }
-    if (xTaskCreate(spi_trans_task, 
-                    "spi_trans_task", 
-                    512, 
-                    NULL, 
-                    CONFIG_EL_NETWORK_PRIO, 
-                    &spi_trans_ctrl) != pdPASS) {
+    if (xTaskCreate(spi_trans_task, "spi_trans_task", 1024, NULL, CONFIG_EL_NETWORK_PRIO, &spi_trans_ctrl) != pdPASS) {
         EL_LOGD("spi_trans_task create error\n");
         return;
     }
-    // xTaskCreate(logger, "logger", 384, NULL, 5, NULL);
-    
+
+    // xTaskCreate(logger, "logger", 1024, NULL, 10, NULL);
+
     at.state = AT_STATE_IDLE;
 }
 
@@ -383,34 +405,34 @@ namespace edgelab {
 
 void NetworkWE2::init(status_cb_t cb) {
     el_err_code_t err = EL_OK;
-    _at = &at;
-    if (at.state == AT_STATE_LOST) {
-        at_base_init(this);
-        if (at.state != AT_STATE_IDLE) return;
-    }
+    _at               = &at;
+
     if (at.port == NULL) {
         at_port_init(&at);
         if (at.port == NULL) return;
+    }
+
+    if (at.state == AT_STATE_LOST) {
+        at_base_init(this);
+        if (at.state != AT_STATE_IDLE) return;
     }
 
     xSemaphoreGive(pubraw_complete);
     at_port_flush(&at);
 
     sprintf(at.tbuf, AT_STR_ECHO AT_STR_CRLF);
-    err = at_send(&at, AT_SHORT_TIME_MS);
-    if (err != EL_OK) {
-        EL_LOGW("AT ECHO ERROR : %d\n", err);
-        return;
-    }
+    do {
+        err = at_send(&at, AT_SHORT_TIME_MS);
+    } while (err != EL_OK);
     sprintf(at.tbuf, AT_STR_HEADER AT_STR_CWMODE "=1" AT_STR_CRLF);
     err = at_send(&at, AT_SHORT_TIME_MS);
     if (err != EL_OK) {
-        EL_LOGW("AT CWMODE ERROR : %d\n", err);
+        EL_LOGD("AT CWMODE ERROR : %d\n", err);
         return;
     }
-    
+
     if (cb) this->status_cb = cb;
-    EL_LOGI("network init ok\n");
+    EL_LOGD("network init ok\n");
     this->_time_synced = false;
     this->set_status(NETWORK_IDLE);
 }
@@ -424,8 +446,14 @@ void NetworkWE2::deinit() {
 #else
     at.port->uart_close();
 #endif
+
+    vSemaphoreDelete(spi_lock);
+    vSemaphoreDelete(tx_done);
+    vSemaphoreDelete(pubraw_complete);
+    vSemaphoreDelete(at_got_response);
+
     delete at_rbuf;
-    at.port = NULL;
+    at.port  = NULL;
     at.state = AT_STATE_LOST;
     this->set_status(NETWORK_LOST);
 }
@@ -441,7 +469,7 @@ el_err_code_t NetworkWE2::join(const char* ssid, const char* pwd) {
     sprintf(at.tbuf, AT_STR_HEADER AT_STR_CWJAP "=\"%s\",\"%s\"" AT_STR_CRLF, ssid, pwd);
     err = at_send(&at, AT_LONG_TIME_MS * 4);
     if (err != EL_OK) {
-        EL_LOGW("AT CWJAP ERROR : %d\n", err);
+        EL_LOGD("AT CWJAP ERROR : %d\n", err);
         return err;
     }
     sprintf(at.tbuf, AT_STR_HEADER AT_STR_CIPSTA "?" AT_STR_CRLF);
@@ -466,44 +494,38 @@ el_err_code_t NetworkWE2::quit() {
 
 el_err_code_t NetworkWE2::set_mdns(mdns_record_t record) {
     el_err_code_t err = EL_OK;
-    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MDNSSTART "=\"%s\"" AT_STR_CRLF, 
-            record.host_name);
+    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MDNSSTART "=\"%s\"" AT_STR_CRLF, record.host_name);
     err = at_send(&at, AT_SHORT_TIME_MS);
     if (err != EL_OK) {
         EL_LOGD("AT MDNS ERROR : %d\n", err);
         return err;
     }
 
-    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MDNSADD "=\"%s\",\"%s\"" AT_STR_CRLF, 
-            MDNS_ITEM_SERVER, record.server);
+    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MDNSADD "=\"%s\",\"%s\"" AT_STR_CRLF, MDNS_ITEM_SERVER, record.server);
     err = at_send(&at, AT_SHORT_TIME_MS);
     if (err != EL_OK) {
         EL_LOGD("AT MDNS ADD %s ERROR : %d\n", MDNS_ITEM_SERVER, err);
         return err;
     }
-    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MDNSADD "=\"%s\",\"%d\"" AT_STR_CRLF,
-            MDNS_ITEM_PORT, record.port);
+    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MDNSADD "=\"%s\",\"%d\"" AT_STR_CRLF, MDNS_ITEM_PORT, record.port);
     err = at_send(&at, AT_SHORT_TIME_MS);
     if (err != EL_OK) {
         EL_LOGD("AT MDNS ADD %s ERROR : %d\n", MDNS_ITEM_PORT, err);
         return err;
     }
-    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MDNSADD "=\"%s\",\"%s\"" AT_STR_CRLF,
-            MDNS_ITEM_PROTOCAL, record.protocol);
+    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MDNSADD "=\"%s\",\"%s\"" AT_STR_CRLF, MDNS_ITEM_PROTOCAL, record.protocol);
     err = at_send(&at, AT_SHORT_TIME_MS);
     if (err != EL_OK) {
         EL_LOGD("AT MDNS ADD %s ERROR : %d\n", MDNS_ITEM_PROTOCAL, err);
         return err;
     }
-    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MDNSADD "=\"%s\",\"%s\"" AT_STR_CRLF,
-            MDNS_ITEM_DEST, record.destination);
+    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MDNSADD "=\"%s\",\"%s\"" AT_STR_CRLF, MDNS_ITEM_DEST, record.destination);
     err = at_send(&at, AT_SHORT_TIME_MS);
     if (err != EL_OK) {
         EL_LOGD("AT MDNS ADD %s ERROR : %d\n", MDNS_ITEM_DEST, err);
         return err;
     }
-    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MDNSADD "=\"%s\",\"%s\"" AT_STR_CRLF,
-            MDNS_ITEM_AUTH, record.authentication);
+    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MDNSADD "=\"%s\",\"%s\"" AT_STR_CRLF, MDNS_ITEM_AUTH, record.authentication);
     err = at_send(&at, AT_SHORT_TIME_MS);
     if (err != EL_OK) {
         EL_LOGD("AT MDNS ADD %s ERROR : %d\n", MDNS_ITEM_AUTH, err);
@@ -524,19 +546,22 @@ el_err_code_t NetworkWE2::connect(const mqtt_server_config_t mqtt_cfg, topic_cb_
     if (cb == NULL) {
         return EL_EINVAL;
     }
-    at.cb = cb;
+    at.cb          = cb;
     this->topic_cb = cb;
 
     if (mqtt_cfg.use_ssl) {
         if (!this->_time_synced) {
-            sprintf(at.tbuf, AT_STR_HEADER AT_STR_CIPSNTPCFG "=1,%d,\"%s\",\"%s\"" AT_STR_CRLF,
-                    UTC_TIME_ZONE_CN, SNTP_SERVER_CN, SNTP_SERVER_US);
-            EL_LOGI("AT CIPSNTPCFG : %s\n", at.tbuf);
+            sprintf(at.tbuf,
+                    AT_STR_HEADER AT_STR_CIPSNTPCFG "=1,%d,\"%s\",\"%s\"" AT_STR_CRLF,
+                    UTC_TIME_ZONE_CN,
+                    SNTP_SERVER_CN,
+                    SNTP_SERVER_US);
+            EL_LOGD("AT CIPSNTPCFG : %s\n", at.tbuf);
             at_port_write(&at);
             uint32_t t = 0;
             while (!this->_time_synced) {
                 if (t >= AT_LONG_TIME_MS * 12) {
-                    EL_LOGI("AT CIPSNTPCFG TIMEOUT\n");
+                    EL_LOGD("AT CIPSNTPCFG TIMEOUT\n");
                     return EL_ETIMOUT;
                 }
                 el_sleep(100);
@@ -546,7 +571,7 @@ el_err_code_t NetworkWE2::connect(const mqtt_server_config_t mqtt_cfg, topic_cb_
         sprintf(at.tbuf, AT_STR_HEADER AT_STR_CIPSNTPTIME AT_STR_CRLF);
         err = at_send(&at, AT_SHORT_TIME_MS);
         if (err != EL_OK) {
-            EL_LOGI("AT CIPSNTPTIME ERROR : %d\n", err);
+            EL_LOGD("AT CIPSNTPTIME ERROR : %d\n", err);
             return err;
         }
     }
@@ -560,17 +585,15 @@ el_err_code_t NetworkWE2::connect(const mqtt_server_config_t mqtt_cfg, topic_cb_
     EL_LOGD("AT MQTTUSERCFG : %s\n", at.tbuf);
     err = at_send(&at, AT_SHORT_TIME_MS);
     if (err != EL_OK) {
-        EL_LOGI("AT MQTTUSERCFG ERROR : %d\n", err);
+        EL_LOGD("AT MQTTUSERCFG ERROR : %d\n", err);
         this->disconnect();
         return err;
     }
 
-    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MQTTCONN "=0,\"%s\",%d,1" AT_STR_CRLF, 
-            mqtt_cfg.address,
-            mqtt_cfg.port);
+    sprintf(at.tbuf, AT_STR_HEADER AT_STR_MQTTCONN "=0,\"%s\",%d,1" AT_STR_CRLF, mqtt_cfg.address, mqtt_cfg.port);
     err = at_send(&at, AT_LONG_TIME_MS * 12);
     if (err != EL_OK) {
-        EL_LOGI("AT MQTTCONN ERROR : %d\n", err);
+        EL_LOGD("AT MQTTCONN ERROR : %d\n", err);
         this->disconnect();
         return err;
     }
@@ -640,9 +663,9 @@ el_err_code_t NetworkWE2::publish(const char* topic, const char* dat, uint32_t l
     }
 
     if (len + strlen(topic) < 200) {
-        char special_chars[] = "\\\"\,\n\r";
-        char buf[230] = {0};
-        uint8_t j = 0;
+        char    special_chars[] = "\\\"\,\n\r";
+        char    buf[230]        = {0};
+        uint8_t j               = 0;
         for (uint8_t i = 0; i < len; i++) {
             if (strchr(special_chars, dat[i]) != NULL) {
                 buf[j++] = '\\';
@@ -656,11 +679,10 @@ el_err_code_t NetworkWE2::publish(const char* topic, const char* dat, uint32_t l
             EL_LOGD("AT MQTTPUB ERROR : %d\n", err);
             return err;
         }
-    } 
-    else if (len + 1 < sizeof(at.tbuf)) {
-        if (xSemaphoreTake(pubraw_complete, 6 * AT_SHORT_TIME_MS * portTICK_PERIOD_MS) != pdTRUE) {
+    } else if (len + 1 < sizeof(at.tbuf)) {
+        if (xSemaphoreTake(pubraw_complete, 20 * AT_SHORT_TIME_MS) != pdPASS) {
             xSemaphoreGive(pubraw_complete);
-            EL_LOGW("AT MQTTPUB ERROR : PUBRAW TIMEOUT\n");
+            EL_LOGD("AT MQTTPUB ERROR : PUBRAW TIMEOUT\n");
             fail_count++;
             return EL_ETIMOUT;
         }
@@ -668,7 +690,7 @@ el_err_code_t NetworkWE2::publish(const char* topic, const char* dat, uint32_t l
         err = at_send(&at, AT_SHORT_TIME_MS);
         if (err != EL_OK) {
             xSemaphoreGive(pubraw_complete);
-            EL_LOGW("AT MQTTPUB ERROR : %d\n", err);
+            EL_LOGD("AT MQTTPUBRAW ERROR : %d\n", err);
             fail_count++;
             return err;
         }
@@ -682,7 +704,7 @@ el_err_code_t NetworkWE2::publish(const char* topic, const char* dat, uint32_t l
         at.port->uart_write_udma(at.tbuf, send_len, (void*)at_port_txcb);
 #endif
     } else {
-        EL_LOGW("AT MQTTPUB ERROR : DATA TOO LONG\n");
+        EL_LOGD("AT MQTTPUB ERROR : DATA TOO LONG\n");
         return EL_ENOMEM;
     }
 
@@ -695,7 +717,7 @@ el_err_code_t NetworkWE2::publish(const char* topic, const char* dat, uint32_t l
 #ifdef CONFIG_EL_NETWORK_SPI_AT
 static void spi_dma_cb(void* status) {
     BaseType_t taskwaken = pdFALSE;
-    xSemaphoreGiveFromISR(spi_sem, &taskwaken);
+    xSemaphoreGiveFromISR(tx_done, &taskwaken);
     portYIELD_FROM_ISR(taskwaken);
 }
 static void at_port_handshake_cb(uint8_t group, uint8_t aIndex) {
@@ -710,7 +732,8 @@ static void at_port_txcb(void* arg) {
     at.sent_len += send_len;
     // EL_LOGD("PUBRAW: %u / %u", at.sent_len, at.tbuf_len);
     if (at.sent_len < at.tbuf_len) {
-        send_len = (at.tbuf_len - at.sent_len) > AT_DMA_TRAN_MAX_SIZE ? AT_DMA_TRAN_MAX_SIZE : (at.tbuf_len - at.sent_len);
+        send_len =
+          (at.tbuf_len - at.sent_len) > AT_DMA_TRAN_MAX_SIZE ? AT_DMA_TRAN_MAX_SIZE : (at.tbuf_len - at.sent_len);
         at.port->uart_write_udma(at.tbuf + at.sent_len, send_len, (void*)at_port_txcb);
     }
 }
@@ -763,12 +786,12 @@ void resp_action_mqtt(const char* resp, void* arg) {
         EL_LOGD("MQTT DISCONNECTED\n");
         xTaskNotify(status_handler, NETWORK_IDLE, eSetValueWithOverwrite);
     } else if (resp[strlen(AT_STR_RESP_MQTT_H)] == 'S') {
-        EL_LOGI("MQTT SUBRECV\n");
+        EL_LOGD("MQTT SUBRECV\n");
         int topic_len = 0, msg_len = 0, str_len = 0;
 
         char* topic_pos = strchr(resp, '"');
         if (topic_pos == NULL) {
-            EL_LOGW("MQTT SUBRECV TOPIC ERROR\n");
+            EL_LOGD("MQTT SUBRECV TOPIC ERROR\n");
             return;
         }
         topic_pos++;  // Skip start character
@@ -777,10 +800,10 @@ void resp_action_mqtt(const char* resp, void* arg) {
         }
         topic_len = str_len;
 
-        str_len = 0;
+        str_len       = 0;
         char* msg_pos = topic_pos + topic_len + 1;
         if (msg_pos[0] != ',') {
-            EL_LOGW("MQTT SUBRECV MSG ERROR\n");
+            EL_LOGD("MQTT SUBRECV MSG ERROR\n");
             return;
         }
         msg_pos++;  // Skip start character
@@ -789,7 +812,7 @@ void resp_action_mqtt(const char* resp, void* arg) {
         }
         for (int i = 0; i < str_len; i++) {
             if (msg_pos[i] < '0' || msg_pos[i] > '9') {
-                EL_LOGW("MQTT SUBRECV MSG ERROR\n");
+                EL_LOGD("MQTT SUBRECV MSG ERROR\n");
                 return;
             }
             msg_len = msg_len * 10 + (msg_pos[i] - '0');
@@ -802,7 +825,7 @@ void resp_action_mqtt(const char* resp, void* arg) {
 }
 void resp_action_ip(const char* resp, void* arg) {
     edgelab::NetworkWE2* net = (edgelab::NetworkWE2*)arg;
-    uint32_t ofs = strlen(AT_STR_RESP_IP_H);
+    uint32_t             ofs = strlen(AT_STR_RESP_IP_H);
     if (strncmp(resp + ofs, "ip:", 3) == 0) {
         ofs += 3;
         net->_ip.ip = ipv4_addr_t::from_str(std::string(resp + ofs, strlen(resp + ofs)));
@@ -824,7 +847,7 @@ void resp_action_ntp(const char* resp, void* arg) {
     return;
 }
 void resp_action_pubraw(const char* resp, void* arg) {
-    // EL_LOGI("AT PUBRAW RESP: %u ms\n", xTaskGetTickCount() - last_pub);
+    // EL_LOGD("AT PUBRAW RESP: %u ms\n", xTaskGetTickCount() - last_pub);
     // last_pub = xTaskGetTickCount();
     xSemaphoreGive(pubraw_complete);
 }

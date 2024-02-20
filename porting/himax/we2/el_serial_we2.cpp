@@ -47,6 +47,7 @@ volatile static SemaphoreHandle_t _mutex_tx = nullptr;
 volatile static DEV_UART*         _uart     = nullptr;
 
 void _uart_dma_recv(void*) {
+    el_printf(".");
     _rb_rx->put(_buf_rx[0]);
     _uart->uart_read_udma(_buf_rx, 1, (void*)_uart_dma_recv);
 }
