@@ -187,9 +187,6 @@ class StaticResource final {
                      << el_make_storage_kv_from_type(current_algorithm_type)
                      << el_make_storage_kv(SSCMA_STORAGE_KEY_BOOT_COUNT, boot_count);
         }
-
-        // increment boot count
-        *storage << el_make_storage_kv(SSCMA_STORAGE_KEY_BOOT_COUNT, ++boot_count);
     }
 
     inline void init_frontend() {

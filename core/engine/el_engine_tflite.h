@@ -375,6 +375,7 @@ class EngineTFLite final : public base::Engine {
 
     el_shape_t       get_input_shape(size_t index) const override;
     el_shape_t       get_output_shape(size_t index) const override;
+    
     el_quant_param_t get_input_quant_param(size_t index) const override;
     el_quant_param_t get_output_quant_param(size_t index) const override;
 

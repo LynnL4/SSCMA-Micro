@@ -54,8 +54,6 @@ void get_device_status(const std::string& cmd, void* caller) {
                            cmd,
                            "\", \"code\": ",
                            std::to_string(EL_OK),
-                           ", \"data\": {\"boot_count\": ",
-                           std::to_string(static_resource->boot_count),
                            ", \"is_ready\": ",
                            std::to_string(static_resource->is_ready.load() ? 1 : 0),
                            "}}\n")};

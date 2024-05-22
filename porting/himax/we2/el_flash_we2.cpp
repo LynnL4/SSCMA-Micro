@@ -75,7 +75,7 @@ bool _el_flash_enable_xip() {
 
 bool el_flash_mmap_init(uint32_t* flash_addr, uint32_t* size, const uint8_t** mmap, uint32_t* handler) {
     *flash_addr = 0x00400000;
-    *size       = 0x00400000;
+    *size       = 0x00A00000;
 
     if (!_el_flash_init()) [[unlikely]]
         return false;

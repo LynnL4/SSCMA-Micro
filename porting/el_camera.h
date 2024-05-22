@@ -41,10 +41,11 @@ class Camera {
     Camera(uint32_t supported_opts_mask = 0) : _is_present(false), _is_streaming(false) {
         std::forward_list<el_sensor_opt_t> presets = {
           el_sensor_opt_t{.id = 0,   .details = "240x240 Auto"},
-          el_sensor_opt_t{.id = 1,   .details = "480x480 Auto"},
-          el_sensor_opt_t{.id = 2,   .details = "640x480 Auto"},
-          el_sensor_opt_t{.id = 3,  .details = "1280x720 Auto"},
-          el_sensor_opt_t{.id = 4, .details = "1920x1080 Auto"}
+          el_sensor_opt_t{.id = 1,   .details = "416x416 Auto"},
+          el_sensor_opt_t{.id = 2,   .details = "480x480 Auto"},
+          el_sensor_opt_t{.id = 3,   .details = "640x480 Auto"},
+          el_sensor_opt_t{.id = 4,  .details = "1280x720 Auto"},
+          el_sensor_opt_t{.id = 5, .details = "1920x1080 Auto"}
         };
 
         for (auto& opt : presets) {

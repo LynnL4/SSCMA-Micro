@@ -26,10 +26,10 @@
 #ifndef _BOARD_DEV_BOARD_WE2_H_
 #define _BOARD_DEV_BOARD_WE2_H_
 
-#define PRODUCT_NAME_PREFIX "dev_board"
+#define PRODUCT_NAME_PREFIX "sensecap_watcher"
 #define PRODUCT_NAME_SUFFIX "v1"
 #define DEVICE_NAME         (PRODUCT_NAME_PREFIX "_" PRODUCT_NAME_SUFFIX)
-#define PORT_DEVICE_NAME    "Dev Board"
+#define PORT_DEVICE_NAME    "SenseCAP Watcher"
 
 #ifdef __cplusplus
 extern "C" {

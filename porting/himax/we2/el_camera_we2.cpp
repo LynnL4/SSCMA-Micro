@@ -42,7 +42,7 @@ namespace edgelab {
 static el_err_code_t (*_drv_cam_init)(uint16_t, uint16_t) = nullptr;
 static el_err_code_t (*_drv_cam_deinit)()                 = nullptr;
 
-CameraWE2::CameraWE2() : Camera(0b00000111) {}
+CameraWE2::CameraWE2() : Camera(0b00001111) {}
 
 el_err_code_t CameraWE2::init(SensorOptIdType opt_id) {
     if (this->_is_present) [[unlikely]] {
@@ -72,12 +72,16 @@ el_err_code_t CameraWE2::init(SensorOptIdType opt_id) {
         this->_current_opt_id = 0;
         break;
     case 1:
-        ret                   = _drv_cam_init(480, 480);
+        ret                   = _drv_cam_init(416, 416);  // ! Note: only multiples of 16
         this->_current_opt_id = 1;
         break;
     case 2:
-        ret                   = _drv_cam_init(640, 480);
+        ret                   = _drv_cam_init(480, 480);
         this->_current_opt_id = 2;
+        break;
+    case 3:
+        ret                   = _drv_cam_init(640, 480);
+        this->_current_opt_id = 3;
         break;
     default:
         ret = EL_EINVAL;
